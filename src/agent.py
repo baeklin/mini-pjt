@@ -81,7 +81,9 @@ def _collect_turn(messages: list) -> tuple[list[dict], list[dict], AIMessage | N
     turn = messages[last_human + 1 :]
     used_models = list(
         dict.fromkeys(
-            m.response_metadata.get("model_name", "unknown") for m in turn if isinstance(m, AIMessage)
+            f"{m.response_metadata.get('model_name', 'unknown')}@{m.response_metadata.get('region', '?')}"
+            for m in turn
+            if isinstance(m, AIMessage)
         )
     )
     tool_args = {
