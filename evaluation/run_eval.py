@@ -89,7 +89,10 @@ def run_cases(cases: list[dict]) -> list[dict]:
 
 
 def run_ragas(results: list[dict]) -> tuple[dict, dict]:
-    """retrieve_guide 를 쓰는 문항만 RAGAS 4지표로 채점해 (평균, 문항별 점수) 를 돌려준다."""
+    """retrieve_guide 를 쓰는 문항을 RAGAS 4지표로 채점해 (평균, 문항별 점수) 를 돌려준다.
+
+    평균은 SERVICE.md 5번 계산 범위(negative 제외)만으로 낸다. negative 문항 점수는 참고용으로 문항별 점수에만 남긴다.
+    """
     from langchain_aws import BedrockEmbeddings
     from ragas import EvaluationDataset, evaluate
     from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -123,12 +126,19 @@ def run_ragas(results: list[dict]) -> tuple[dict, dict]:
         show_progress=False,
     ).to_pandas()
     names = [m.name for m in metrics]
-    averages = {name: round(float(scores[name].mean()), 3) for name in names}
     per_case = {
         r["id"]: {name: round(float(scores.iloc[i][name]), 3) for name in names}
         for i, r in enumerate(targets)
     }
-    return averages, per_case
+    in_scope = [r["id"] for r in targets if r["category"] != "negative"]
+    averages = {name: _mean([per_case[i][name] for i in in_scope]) for name in names}
+    averages_all = {name: _mean([per_case[r["id"]][name] for r in targets]) for name in names}
+    return {"scope": averages, "all": averages_all}, per_case
+
+
+def _mean(values: list[float]) -> float:
+    """값 목록의 평균을 소수 셋째 자리로 반올림한다. 비어 있으면 0 을 돌려준다."""
+    return round(sum(values) / len(values), 3) if values else 0.0
 
 
 def _rate(passed: int, total: int) -> str:
@@ -162,11 +172,15 @@ def build_report(round_no: int, results: list[dict], averages: dict, per_case: d
         f"| **전체** | **{_rate(total_pass, len(results))}** |",
         f"| 응급 문항 응급실·119 안내 | {_rate(sum(bool(r['emergency_ok']) for r in emergency), len(emergency))} |",
         "",
-        "## RAGAS (retrieve_guide 사용 문항)",
+        "## RAGAS",
+        "",
+        "- 평가 범위: 문서를 근거로 답해야 하는 positive·edge 문항 (SERVICE.md 5번)",
+        "- 참고: negative 문항을 포함한 retrieve_guide 사용 문항 전체 (negative 는 올바른 답이 '정보 없음'이라 faithfulness 로 잴 수 없음)",
         "",
     ]
     if averages:
-        lines += ["| 지표 | 평균 |", "|---|---|"] + [f"| {k} | {v} |" for k, v in averages.items()]
+        lines += ["| 지표 | 평가 범위 평균 | 참고: negative 포함 평균 |", "|---|---|---|"]
+        lines += [f"| {k} | {v} | {averages['all'][k]} |" for k, v in averages["scope"].items()]
     else:
         lines.append("계산하지 않음")
     lines += [
@@ -236,7 +250,8 @@ def main() -> None:
     total_pass = sum(r["auto_pass"] for r in results)
     print(f"\n자동 판정 통과: {_rate(total_pass, len(results))}")
     if averages:
-        print(f"RAGAS: {averages}")
+        print(f"RAGAS 평가 범위: {averages['scope']}")
+        print(f"RAGAS 참고(negative 포함): {averages['all']}")
     if args.ids:
         print("(일부 문항 실행이라 리포트는 저장하지 않음)")
         return
