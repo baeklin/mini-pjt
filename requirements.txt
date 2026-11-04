@@ -1,0 +1,12 @@
+langchain>=1.0
+langgraph>=1.0
+langchain-aws>=1.0
+langchain-community
+langchain-text-splitters
+faiss-cpu
+rank-bm25
+fastapi
+uvicorn
+python-dotenv
+ragas
+langsmith
