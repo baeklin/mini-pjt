@@ -104,7 +104,12 @@ def _collect_turn(messages: list) -> tuple[list[dict], list[dict], AIMessage | N
                 "output": mask_pii(_truncate(str(m.content))),
             }
         )
-        for ctx in m.artifact or []:
+        # 문서 검색은 찾은 문서 조각을, 그 밖의 도구(기록 조회·계산)는 도구 결과 자체를 답변의 근거로 남긴다
+        if m.artifact:
+            tool_contexts = m.artifact
+        else:
+            tool_contexts = [{"doc_id": f"tool:{m.name}", "text": mask_pii(str(m.content))}]
+        for ctx in tool_contexts:
             key = (ctx["doc_id"], ctx["text"])
             if key not in seen:
                 seen.add(key)
