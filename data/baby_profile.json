@@ -1,0 +1,40 @@
+{
+  "_note": "더미 데이터. 실제 인물이 아니다.",
+  "baby_id": "baby-001",
+  "name": "하늘",
+  "birth_date": "2026-03-10",
+  "sex": "female",
+  "birth_order": 1,
+  "feeding_type": "모유",
+  "weaning_started": "2026-09-12",
+  "allergies": [],
+  "guardian": {
+    "name": "김보호",
+    "phone": "010-0000-0000"
+  },
+  "vaccinations_done": [
+    {"vaccine": "HepB", "dose": 1, "date": "2026-03-10"},
+    {"vaccine": "BCG", "dose": 1, "date": "2026-03-31"},
+    {"vaccine": "HepB", "dose": 2, "date": "2026-04-10"},
+    {"vaccine": "DTaP", "dose": 1, "date": "2026-05-11"},
+    {"vaccine": "IPV", "dose": 1, "date": "2026-05-11"},
+    {"vaccine": "Hib", "dose": 1, "date": "2026-05-11"},
+    {"vaccine": "PCV", "dose": 1, "date": "2026-05-11"},
+    {"vaccine": "RV", "dose": 1, "date": "2026-05-11"},
+    {"vaccine": "DTaP", "dose": 2, "date": "2026-07-10"},
+    {"vaccine": "IPV", "dose": 2, "date": "2026-07-10"},
+    {"vaccine": "Hib", "dose": 2, "date": "2026-07-10"},
+    {"vaccine": "PCV", "dose": 2, "date": "2026-07-10"},
+    {"vaccine": "RV", "dose": 2, "date": "2026-07-10"},
+    {"vaccine": "DTaP", "dose": 3, "date": "2026-09-10"},
+    {"vaccine": "IPV", "dose": 3, "date": "2026-09-10"},
+    {"vaccine": "Hib", "dose": 3, "date": "2026-09-10"},
+    {"vaccine": "PCV", "dose": 3, "date": "2026-09-10"},
+    {"vaccine": "RV", "dose": 3, "date": "2026-09-10"},
+    {"vaccine": "HepB", "dose": 3, "date": "2026-09-10"}
+  ],
+  "checkups_done": [
+    {"round": 1, "date": "2026-04-01"},
+    {"round": 2, "date": "2026-08-05"}
+  ]
+}
