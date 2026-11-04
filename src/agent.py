@@ -1,22 +1,20 @@
 """메인 에이전트 그래프: 입력 가드레일 → ReAct 에이전트(도구 3개) → 출력 가드레일 순서로 질문에 답한다."""
 
 import json
-import os
 import sys
 import uuid
 from datetime import date
 from functools import lru_cache
-from pathlib import Path
 
-from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelFallbackMiddleware
 from langchain.agents.structured_output import ToolStrategy
-from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field
 
 from guardrails import check_input, check_output, mask_pii
+from llm import build_models
 from tools import (
     calc_vaccine_schedule,
     get_age_months,
@@ -24,9 +22,6 @@ from tools import (
     load_profile,
     retrieve_guide,
 )
-
-ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
 
 TOOLS = [retrieve_guide, get_baby_records, calc_vaccine_schedule]
 TOOL_NAMES = {t.name for t in TOOLS}
@@ -59,17 +54,18 @@ class AgentAnswer(BaseModel):
 
 @lru_cache(maxsize=1)
 def build_agent():
-    """Bedrock 모델과 도메인 도구로 ReAct 에이전트 그래프를 한 번만 만든다."""
-    model = ChatBedrockConverse(
-        model=os.environ["BEDROCK_MODEL_ID"],
-        region_name=os.environ["AWS_REGION"],
-        temperature=0,
-    )
+    """Bedrock 모델과 도메인 도구로 ReAct 에이전트 그래프를 한 번만 만든다.
+
+    대체 모델이 설정되어 있으면 ModelFallbackMiddleware 로 1순위 모델 실패 시 순서대로 넘긴다.
+    """
+    primary, *fallbacks = build_models()
+    middleware = [ModelFallbackMiddleware(*fallbacks)] if fallbacks else []
     return create_agent(
-        model=model,
+        model=primary,
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
         response_format=ToolStrategy(AgentAnswer),
+        middleware=middleware,
         checkpointer=InMemorySaver(),
     )
 
@@ -80,16 +76,22 @@ def _truncate(text: str, limit: int = TRACE_OUTPUT_LIMIT) -> str:
 
 
 def _collect_turn(messages: list) -> tuple[list[dict], list[dict], AIMessage | None]:
-    """이번 질문 이후의 메시지에서 도구 호출 trace, contexts, 마지막 AI 메시지를 모은다."""
+    """이번 질문 이후의 메시지에서 사용 모델·도구 호출 trace, contexts, 마지막 AI 메시지를 모은다."""
     last_human = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
     turn = messages[last_human + 1 :]
+    used_models = list(
+        dict.fromkeys(
+            m.response_metadata.get("model_name", "unknown") for m in turn if isinstance(m, AIMessage)
+        )
+    )
     tool_args = {
         call["id"]: call["args"]
         for m in turn
         if isinstance(m, AIMessage)
         for call in m.tool_calls
     }
-    trace, contexts, seen = [], [], set()
+    trace = [{"step": "model", "input": "agent", "output": ", ".join(used_models)}]
+    contexts, seen = [], set()
     for m in turn:
         if not isinstance(m, ToolMessage) or m.name not in TOOL_NAMES:
             continue

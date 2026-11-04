@@ -1,16 +1,11 @@
 """입력·출력 가드레일: 응급 신호, 프롬프트 인젝션, 지원 범위 밖 질문, 개인정보 마스킹, 진단·약 용량 출력 검사."""
 
-import os
 import re
 from functools import lru_cache
-from pathlib import Path
 
-from dotenv import load_dotenv
-from langchain_aws import ChatBedrockConverse
 from pydantic import BaseModel, Field
 
-ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+from llm import build_structured_model
 
 GO_TO_ER = "지금 바로 119에 전화하거나 가까운 응급실로 가세요."
 
@@ -143,13 +138,8 @@ OUTPUT_JUDGE_PROMPT = """너는 육아 상담 답변의 안전 검사관이다. 
 
 @lru_cache(maxsize=1)
 def _judge_model():
-    """출력 판정에 쓸 구조화 출력 LLM 을 한 번만 만든다."""
-    model = ChatBedrockConverse(
-        model=os.environ["BEDROCK_MODEL_ID"],
-        region_name=os.environ["AWS_REGION"],
-        temperature=0,
-    )
-    return model.with_structured_output(OutputVerdict)
+    """출력 판정에 쓸 구조화 출력 LLM(대체 모델 포함)을 한 번만 만든다."""
+    return build_structured_model(OutputVerdict)
 
 
 def check_output(answer: str) -> tuple[str, OutputVerdict]:
