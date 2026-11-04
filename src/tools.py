@@ -1,9 +1,9 @@
-"""도메인 도구: 육아 가이드 검색, 아이 기록 조회, 예방접종 일정 계산."""
+"""도메인 도구: 육아 가이드 검색, 아이 기록 조회, 예방접종·건강검진 일정 계산."""
 
 import calendar
 import json
 import os
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -44,6 +44,16 @@ VACCINE_SCHEDULE = [
     ("A형간염(HepA)", "1~2차", 12, 23),
     ("일본뇌염", "불활성화 1~2차 또는 약독화 1차", 12, 23),
     ("DTaP", "4차", 15, 18),
+]
+
+
+# 영유아 건강검진 일정 (data/guides/02_health_checkup.md 와 같은 내용, 생후 0~24개월 해당 차수)
+# (차수, 단위, 시작, 끝, 권장 시기 표기, 구강검진 시기, 발달선별검사 포함 여부)
+CHECKUP_SCHEDULE = [
+    ("1차", "days", 14, 35, "생후 14~35일", None, False),
+    ("2차", "months", 4, 6, "생후 4~6개월", None, False),
+    ("3차", "months", 9, 12, "생후 9~12개월", None, True),
+    ("4차", "months", 18, 24, "생후 18~24개월", "생후 18~29개월", True),
 ]
 
 
@@ -174,5 +184,51 @@ def calc_vaccine_schedule(birth_date: str) -> str:
         "월령_개월": age_months,
         "다음_접종": next_vaccines,
         "근거": "질병관리청 표준 예방접종 일정 (가이드 문서: 표준 예방접종 일정)",
+    }
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool
+def calc_checkup_schedule(birth_date: str) -> str:
+    """생년월일(YYYY-MM-DD)로 영유아 건강검진(생후 0~24개월 차수) 중 지금 받을 수 있거나 다음에 받을 차수와 시작일을 계산한다.
+
+    생년월일은 get_baby_records 로 먼저 확인한다. 정확한 검진 마감일은 계산하지 않으며,
+    국민건강보험공단 '영유아 검진일자 조회'로 확인하도록 안내한다.
+    """
+    birth = date.fromisoformat(birth_date)
+    today = get_today()
+    age = {"days": (today - birth).days, "months": get_age_months(birth, today)}
+
+    def start_date(unit: str, start: int) -> date:
+        """검진 차수의 시작일을 계산한다."""
+        return birth + timedelta(days=start) if unit == "days" else add_months(birth, start)
+
+    open_now = [c for c in CHECKUP_SCHEDULE if c[2] <= age[c[1]] <= c[3]]
+    upcoming = [c for c in CHECKUP_SCHEDULE if age[c[1]] < c[2]]
+    selected, status = (open_now, "지금 받을 수 있음") if open_now else (upcoming[:1], "예정")
+    if not selected:
+        return json.dumps(
+            {"기준_날짜": today.isoformat(), "월령_개월": age["months"],
+             "안내": "생후 0~24개월 건강검진 차수가 모두 지났습니다. 다음은 5차(생후 30~36개월)입니다."},
+            ensure_ascii=False,
+        )
+    checkups = [
+        {
+            "차수": round_name,
+            "권장_시기": period,
+            "시작일": start_date(unit, start).isoformat(),
+            "상태": status,
+            "구강검진_시기": oral or "없음",
+            "발달선별검사_포함": development,
+        }
+        for round_name, unit, start, _end, period, oral, development in selected
+    ]
+    result = {
+        "기준_날짜": today.isoformat(),
+        "생년월일": birth_date,
+        "월령_개월": age["months"],
+        "다음_검진": checkups,
+        "마감일_안내": "정확한 검진 기간(마감일)은 국민건강보험공단 '영유아 검진일자 조회'에서 확인",
+        "근거": "국민건강보험공단 영유아 건강검진 안내 (가이드 문서: 영유아 건강검진 시기)",
     }
     return json.dumps(result, ensure_ascii=False)

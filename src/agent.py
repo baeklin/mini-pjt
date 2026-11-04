@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from guardrails import check_input, check_output, mask_pii
 from llm import build_models
 from tools import (
+    calc_checkup_schedule,
     calc_vaccine_schedule,
     get_age_months,
     get_baby_records,
@@ -23,7 +24,7 @@ from tools import (
     retrieve_guide,
 )
 
-TOOLS = [retrieve_guide, get_baby_records, calc_vaccine_schedule]
+TOOLS = [retrieve_guide, get_baby_records, calc_vaccine_schedule, calc_checkup_schedule]
 TOOL_NAMES = {t.name for t in TOOLS}
 # trace 에 남길 도구 출력의 최대 길이
 TRACE_OUTPUT_LIMIT = 500
@@ -35,6 +36,9 @@ SYSTEM_PROMPT = """너는 생후 0~24개월 첫째 아이를 키우는 초보 �
 2. 육아 정보 질문은 retrieve_guide 로 가이드 문서를 검색한 뒤 답한다.
    우리 아이의 월령·기록이 필요한 질문은 get_baby_records 를 먼저 부른다.
    예방접종 일정 질문은 get_baby_records 로 생년월일을 확인한 뒤 calc_vaccine_schedule 을 부른다.
+   영유아 건강검진 질문에는 retrieve_guide 로 차수별 일반 시기를 확인하고, get_baby_records 로 생년월일을
+   확인한 뒤 calc_checkup_schedule 로 우리 아이의 다음 검진 차수·시작일도 함께 안내한다.
+   검진 마감일은 계산하지 말고 국민건강보험공단 '영유아 검진일자 조회'로 확인하도록 안내한다.
 3. 가이드 문서로 답할 때는 답변 끝에 "(출처: 문서 제목)" 형식으로 출처를 적는다.
 4. 검색 결과에 질문에 대한 내용이 없으면 "제가 가진 육아 가이드 문서에는 해당 정보가 없습니다"라고 말하고
    소아청소년과 상담을 안내하는 것으로 답을 끝낸다. 사이트·기관·앱 이름, 일반 상식 조언, 학회 권고처럼
