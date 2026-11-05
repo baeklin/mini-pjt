@@ -274,7 +274,13 @@ def search_clinics(day: str = "내일", time_of_day: str = "전체") -> str:
     day 는 '오늘', '내일', '모레' 또는 YYYY-MM-DD, time_of_day 는 '오전', '오후', '저녁', '전체' 중 하나다.
     결과의 clinic_id 와 시간(YYYY-MM-DD HH:MM)을 book_clinic 에 그대로 넘긴다.
     """
-    target = _resolve_date(day)
+    try:
+        target = _resolve_date(day)
+    except ValueError:
+        return json.dumps(
+            {"안내": f"'{day}' 날짜를 이해하지 못했습니다. '오늘', '내일', '모레' 또는 YYYY-MM-DD 형식으로 알려 주세요."},
+            ensure_ascii=False,
+        )
     start_hour, end_hour = TIME_RANGES.get(time_of_day, TIME_RANGES["전체"])
     clinics = []
     for clinic in load_clinics():

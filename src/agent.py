@@ -4,6 +4,7 @@
 """
 
 import json
+import re
 import sys
 import uuid
 from datetime import date
@@ -43,7 +44,12 @@ TOOLS = [
 ]
 # 사람 승인 없이는 실행하지 않는 도구
 APPROVAL_TOOLS = {"book_clinic"}
-APPROVE_WORDS = ("예", "네", "응", "좋아", "그래", "승인", "진행")
+# 승인은 짧은 승인 표현으로만 이루어진 답만 인정한다. '예약 시간 바꿔줘'처럼 '예'로 시작하는 다른 말을
+# 승인으로 잘못 읽지 않도록, 애매하면 승인하지 않고 다시 묻는다.
+APPROVE_PATTERN = re.compile(
+    r"^(예|네|응|넵|좋아요?|그래요?|승인(합니다|할게요)?)\s*[,.!~]?\s*"
+    r"((예약|진행)?\s*해\s*(줘|주세요|요)?)?\s*[.!~]*$"
+)
 REJECT_WORDS = ("아니", "취소", "싫어", "거절", "하지 마", "안 할")
 TOOL_NAMES = {t.name for t in TOOLS}
 # trace 에 남길 도구 출력의 최대 길이
@@ -168,11 +174,11 @@ def _pending_actions(agent, config: dict) -> list[dict]:
 
 
 def _parse_decision(text: str) -> str | None:
-    """승인 대기 중 사용자 답을 'approve' 또는 'reject' 로 해석한다. 판단할 수 없으면 None."""
+    """승인 대기 중 사용자 답을 'approve' 또는 'reject' 로 해석한다. 판단할 수 없으면 None (다시 확인)."""
     text = text.strip()
     if any(word in text for word in REJECT_WORDS):
         return "reject"
-    if any(text.startswith(word) for word in APPROVE_WORDS) or "승인" in text or "진행해" in text:
+    if APPROVE_PATTERN.match(text):
         return "approve"
     return None
 
