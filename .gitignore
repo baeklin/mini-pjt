@@ -10,5 +10,5 @@ __pycache__/
 mini pjt.html
 mini pjt.pdf
 
-# Claude Code 개인 설정
-.claude/settings.local.json
+# Claude Code 설정
+.claude/
