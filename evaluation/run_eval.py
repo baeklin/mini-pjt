@@ -127,7 +127,8 @@ def run_ragas(results: list[dict]) -> tuple[dict, dict]:
         metrics=metrics,
         llm=LangchainLLMWrapper(judge),
         embeddings=LangchainEmbeddingsWrapper(embeddings),
-        run_config=RunConfig(max_workers=4),  # 동시 호출을 줄여 쓰로틀링을 피한다 (기본 16)
+        # 동시 호출을 줄이고(기본 16) 재시도 대기를 늘려 쓰로틀링을 피한다
+        run_config=RunConfig(max_workers=2, timeout=600, max_wait=120),
         show_progress=False,
     ).to_pandas()
     names = [m.name for m in metrics]
