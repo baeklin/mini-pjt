@@ -1,0 +1,141 @@
+# 미니 PJT: AI 육아도우미
+
+## 무엇을 푸나
+생후 0~24개월 첫째 아이를 키우는 초보 부모가 "우리 아이 월령에 이게 정상인가, 지금 무엇을 해야 하나"를 근거 있는 정보로 바로 확인하지 못하는 문제를 푼다. 공식 자료를 요약한 문서와 우리 아이 기록을 근거로 답하고, 접종·검진 일정을 계산하고, 승인을 받아 소아과를 예약한다. 응급 신호는 모델을 거치지 않고 규칙으로 먼저 잡아 119·응급실로 안내한다.
+
+서비스 정의, 성공 기준, 가드레일 정책은 [SERVICE.md](SERVICE.md) 에 있다.
+
+## 활용한 패턴 (Day 1~7)
+- Day 1: LCEL 구조화 출력 (#1) — 최종 답변을 Pydantic `AgentAnswer` 로 받고(`ToolStrategy`), API 는 `answer`·`contexts`·`trace` dict 로 반환
+- Day 2: RAG (#3) — 가이드 문서 8개를 `##` 섹션 단위 33청크로 나누고, BM25(한국어 2-gram 토큰) + Titan 임베딩·FAISS 를 RRF 로 결합한 하이브리드 검색
+- Day 3: ReAct (#2) — `create_agent` 에 도구 6개를 주고 질문마다 모델이 도구를 골라 호출
+- Day 4: 도구 다중 (#4) — 문서 검색, 아이 기록 조회, 접종·검진 일정 계산, 소아과 조회·예약. 한 질문에 2~3개를 결합 (예: 기록 조회 → 접종 계산)
+- Day 5: 가드레일 (#6) — 입력은 규칙 기반(응급 신호, 프롬프트 인젝션, 지원 범위 밖, 개인정보 마스킹), 출력은 LLM 판정(진단·약 용량 포함 여부)
+- Day 5: HITL (#7) — `HumanInTheLoopMiddleware` 로 `book_clinic` 실행 직전에 멈추고, 같은 `thread_id` 로 '예'/'아니오'를 받아 재개
+- Day 5: 미들웨어 (#8) — `ModelFallbackMiddleware` 로 쓰로틀링 시 다른 모델·리전으로 순서대로 전환, HITL 미들웨어
+- Day 7: Observability · Trace (#11) — LangSmith 에 질문 하나당 하나의 트리로 기록(입력 개인정보 마스킹), 응답의 `trace` 키에 가드레일·도구 단계 기록
+- Day 7: 평가 (#12) — 인-아웃 세트 21건 자동·사람 판정 + RAGAS 4지표, 1차·2차 리포트
+
+## 아키텍처
+```
+POST /query {question, thread_id?}                          src/api.py
+  │
+  ▼ run_query()                                             src/agent.py
+  ① 개인정보 마스킹 ─────────────────────────────────────── src/guardrails.py
+  ② 승인 대기 중인 예약이 있으면 → '예'/'아니오'로 해석해 재개
+  ③ 입력 가드레일 (규칙): 응급 → 인젝션 → 범위 밖
+       └ 걸리면 LLM 없이 고정 안내 문구로 즉시 반환
+  ④ ReAct 에이전트 (create_agent + ChatBedrockConverse, temperature 0)
+       도구 ─────────────────────────────────────────────── src/tools.py
+         retrieve_guide ─ 하이브리드 검색 ─────────────────── src/retriever.py
+         get_baby_records / calc_vaccine_schedule / calc_checkup_schedule
+         search_clinics / book_clinic (← HITL: 실행 전 승인)
+       미들웨어: ModelFallback(모델·리전 폴백) ──────────── src/llm.py
+  ⑤ 출력 가드레일 (LLM 판정): 진단·약 용량이면 거절 문구로 교체
+  ⑥ 마스킹 → {answer, contexts, trace}
+  (LangSmith: run_query 하나가 하나의 트리로 기록)
+
+data/guides/*.md      질병관리청·국민건강보험공단 등 공개 자료 요약 8개 (출처 URL 표기)
+data/*.json           더미 아이 프로필·7일 기록·소아과 목록
+evaluation/           인-아웃 세트, RAGAS 모범 답안, 채점 스크립트, 1차·2차 리포트
+```
+
+## 실행 방법
+```powershell
+# 1. 가상환경과 패키지 (Python 3.14 에서 확인)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# 2. 환경변수: .env.example 을 복사해 AWS·Bedrock·LangSmith 값을 채운다
+Copy-Item .env.example .env
+
+# 3. 시험 질문 3개 실행 (접종일, 경련, 범위 밖)
+python src/agent.py
+
+# 4. API 서버
+uvicorn api:app --app-dir src --port 8000
+```
+
+API 호출 예시 (예약 승인 흐름):
+```bash
+# 예약 요청 → 후보 목록과 승인 질문이 answer 로 온다 (아직 예약되지 않음)
+curl -X POST http://127.0.0.1:8000/query -H "Content-Type: application/json" \
+  -d '{"question": "내일 오전 소아과 예약해줘", "thread_id": "demo-1"}'
+
+# 같은 thread_id 로 승인 → 예약 완료와 예약번호
+curl -X POST http://127.0.0.1:8000/query -H "Content-Type: application/json" \
+  -d '{"question": "예", "thread_id": "demo-1"}'
+```
+
+평가 실행:
+```powershell
+python evaluation/run_eval.py --round 2            # 21문항 + RAGAS → evaluation/round2_report.md
+python evaluation/run_eval.py --round 2 --ids 7,13 # 일부 문항만 (리포트 저장 안 함)
+```
+
+- 평가 재현성을 위해 기준 날짜는 `.env` 의 `TODAY=2026-11-04` 로 고정한다.
+- 대체 모델은 `BEDROCK_FALLBACK_MODEL_IDS` 에 `모델ID@리전` 을 쉼표로 적는다.
+
+## RAGAS 평가 결과
+2차 평가 기준. 계산 범위는 문서를 근거로 답해야 하는 positive·edge 6문항(2, 3, 5, 6, 13, 14번)이다 (SERVICE.md 5번).
+
+| 지표 | 평가 범위 (6문항) | 참고: negative 포함 (9문항) |
+|---|---|---|
+| context_recall | 0.74 | 0.72 |
+| context_precision | 0.65 | 0.44 |
+| faithfulness | **0.90** (목표 0.8) | 0.73 |
+| answer_relevancy | 0.52 | 0.35 |
+
+- faithfulness 는 1차 0.71 → 2차 0.90 (평가 범위 6문항 기준)
+- negative 문항(8~10번)은 올바른 답이 "문서에 정보가 없다"라서 문서 근거로 잴 수 없어 평가 범위에서 뺐고, 대신 forbidden 과 사람 확인으로 검증했다. 투명성을 위해 참고값을 함께 적는다.
+
+## 인-아웃 세트 통과율 (자체 평가)
+통과 = 기대 도구 호출 + forbidden 없음 + expected_traits 사람 확인 충족
+
+- 1차 (Day 9 시작 전 기준선, 1~18번): 14 / 18 통과 — [round1_report.md](evaluation/round1_report.md)
+- 2차 (Day 9 개선 후, 1~21번): 19 / 21 통과 — [round2_report.md](evaluation/round2_report.md)
+  - 같은 기준 문항 1~18번: 14 → 17 / 18
+- 개선폭: +3 건 (주요 개선 사항: 7번 예약 승인 구현, 8·9·10번 문서에 없는 내용 지어내기 제거)
+- 2차 이후 추가 개선 (개선 루프 3회차): 2차 FAIL 2건(13, 20번)을 수정했고 21문항 자동 판정 21/21 로 회귀가 없음을 확인했다. 정식 리포트로 다시 채점하지는 않았고, 13·20번 답변은 직접 읽어 확인했다.
+
+## 트라이앤에러 회고
+
+### 시도했지만 실패한 접근 · 왜 실패했는가
+- **RAGAS faithfulness 가 낮게 나와 답변 품질 문제로만 봤다** — 실제로는 측정 방식 문제가 섞여 있었다. 답변에 쓴 기록 조회·계산 도구 결과가 `contexts` 에 빠져 있어, 사실인 문장(생년월일, 월령, 수면 시간)도 "근거 없음"으로 채점됐다. 정확하게 답할수록 점수가 깎이는 구조였다.
+- **"모른다"로 끝내라고만 지시했다** — 문서에 없는 질문(수면교육 앱, 옷 사이즈, 보행기)에 "정보 없음"까지는 답했지만, 도움을 주려고 육아 포털 URL·학회 권고·일반 조언을 지어 붙였다. 자동 판정은 통과였고 사람이 답변을 읽고서야 발견했다.
+- **프롬프트 규칙으로 응급 기준 확대를 막으려 했다** (13번) — "3개월 미만 기준을 다른 월령에 적용하지 말라"를 넣어도 답변이 그대로였다. 문서의 "즉시 응급실" 섹션 안에 3개월 미만 전용 기준과 "바로 진료" 항목이 함께 있어, 모델이 섹션 제목대로 모두 응급으로 읽었기 때문이다. 이 수정은 되돌렸다.
+- **한 문항을 고치는 문장이 다른 문항을 깨뜨렸다** — 검진 질문 규칙의 "필요하면"이라는 표현 때문에 5번이 아이 기준 안내를 생략했고, 예약 후보 안내 규칙이 7번의 예약 제안을 되묻기로 바꿨다.
+- **RAGAS 0.4.3 import 실패** — langchain-community 0.4 에서 없어진 vertexai 모듈을 import 해서 불러오지 못했다. 다운그레이드는 LangChain 1.x 와 충돌 위험이 커서 택하지 않았다.
+- **가이드 문서에 검색 요약만 보고 쓴 문장** — 원문 대조 중 일부 문장이 폐렴(소아) 페이지의 내용을 일반 발열에 넓혀 쓴 것으로 드러났다.
+
+### 최종 채택한 접근 · 왜 그것으로 갔는가
+- **측정 먼저 고치고, 한 번에 하나씩** — 도구 결과를 `contexts` 에 넣어 측정을 바로잡은 뒤(0.57 → 0.70), 프롬프트를 한 가지씩 고쳤다. 고칠 때마다 21문항 전체를 다시 돌려 회귀를 잡았다. 효과 없는 수정은 남기지 않고 되돌렸다.
+- **"정보 없음 + 소아과 상담"으로 답을 끝내게 좁힘** — 사이트·기관·조언·권고를 명시적으로 금지하자 8~10번의 지어내기가 사라졌다.
+- **'지어낸 정보'의 판정 기준을 문장으로 정의** — 1차 사람 확인 중 애매한 사례(용어 보충 설명, 계산값, 표현 차이)가 나와 SERVICE.md 5번에 정의를 추가했다. 1차·2차를 같은 잣대로 판정하기 위해서다.
+- **프롬프트 대신 문서 구조로 해결** (13번) — 07번 문서를 "모든 월령 즉시 응급 / 생후 3개월 미만만 즉시 응급 / 1세 미만 바로 진료" 세 섹션으로 나누자, 모델이 기준을 넓히지 않았다. 지시보다 근거의 구조가 더 강하게 작동했다.
+- **응급 신호는 규칙으로 먼저** — "100% 안내"가 기준이라 확률적인 LLM 에 맡기지 않았다. 응급 문항 3건은 1·2차 모두 3/3.
+- **계산은 도구로, 요일·날짜도 도구 결과에** — 모델이 요일을 직접 계산하다 틀린 것을 보고 도구 결과에 요일을 넣었다. 검진 마감일은 공식 문서에 계산 방식이 없어 계산하지 않고 공단 조회로 안내한다.
+- **RAGAS 는 스크립트 안에서만 빈 모듈로 우회** — 영향 범위가 평가 스크립트 하나로 한정된다.
+- **강사 피드백 반영** — 범위가 넓다는 피드백에 따라 미착수였던 주간 리포트(Plan-Execute)를 범위에서 뺐다. 이미 구현·검증된 핵심과 예약 승인은 유지했다.
+
+### 남은 한계 · 향후 개선 방향
+- `calc_vaccine_schedule` 은 표준 일정만 보고 실제 접종 이력은 확인하지 않는다. 접종을 놓친 아이에게도 "다음 접종"만 안내한다.
+- 예약과 대화 상태는 메모리에만 있어 서버를 재시작하면 사라진다. 실제 서비스에는 DB 와 영속 체크포인터가 필요하다.
+- "생후 3개월 미만 38℃ 이상 즉시 응급" 과 "돌 이전 정상 체온 37.5℃" 는 공식 기관 원문을 찾지 못해 전문의 인용 기사를 근거로 했다 (문서에 출처 수준 명시).
+- 응급 규칙은 확실한 신호만 키워드로 잡는다. "숨소리가 쌕쌕거려요" 같은 표현은 응급으로 잡지 않고 에이전트로 넘긴다.
+- RAGAS answer_relevancy 가 낮다(0.52). 원인은 아직 분석하지 않았다.
+- LLM 응답은 확률적이라 같은 문항도 실행마다 조금씩 달라진다. 반복 실행으로 경향을 보는 평가는 하지 못했다.
+- 데이터는 아이 1명 더미이고, 아이 여러 명 관리·실제 병원 예약 연동은 범위 밖이다.
+- 향후: 주간 육아 리포트(Plan-Execute), 아이 정보 장기 메모리, 아이 기록을 MCP 서버로 분리.
+
+## 핵심 코드 위치
+- `src/agent.py:88` — 메인 에이전트 그래프 (`build_agent`: create_agent + 폴백·HITL 미들웨어)
+- `src/agent.py:52` — 시스템 프롬프트 (답변 원칙 9가지)
+- `src/agent.py:199` — `run_query`: 마스킹 → 승인 재개 → 입력 가드레일 → 에이전트 → 출력 가드레일
+- `src/tools.py` — 도메인 도구 6개 (`retrieve_guide:105`, `get_baby_records:123`, `calc_vaccine_schedule:150`, `calc_checkup_schedule:193`, `search_clinics:271`, `book_clinic:306`)
+- `src/retriever.py` — RAG 파이프라인 (`load_guides:32`, RRF 결합 `_reciprocal_rank_fusion:80`, `search:93`)
+- `src/guardrails.py` — 입력·출력 가드레일 (`EMERGENCY_RULES:13`, `check_input:99`, `mask_pii:113`, `check_output:145`)
+- `src/llm.py` — Bedrock 모델 생성과 모델·리전 폴백
+- `src/api.py:41` — `POST /query`
+- `evaluation/run_eval.py` — 채점 스크립트 (자동 판정 `grade:51`, RAGAS `run_ragas:91`)
