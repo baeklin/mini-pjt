@@ -7,7 +7,7 @@
 
 ## 활용한 패턴 (Day 1~7)
 - Day 1: LCEL 구조화 출력 (#1) — 최종 답변을 Pydantic `AgentAnswer` 로 받고(`ToolStrategy`), API 는 `answer`·`contexts`·`trace` dict 로 반환
-- Day 2: RAG (#3) — 가이드 문서 8개를 `##` 섹션 단위 33청크로 나누고, BM25(한국어 2-gram 토큰) + Titan 임베딩·FAISS 를 RRF 로 결합한 하이브리드 검색
+- Day 2: RAG (#3) — 가이드 문서 8개를 `##` 섹션 단위 35청크로 나누고, BM25(한국어 2-gram 토큰) + Titan 임베딩·FAISS 를 RRF 로 결합한 하이브리드 검색
 - Day 3: ReAct (#2) — `create_agent` 에 도구 6개를 주고 질문마다 모델이 도구를 골라 호출
 - Day 4: 도구 다중 (#4) — 문서 검색, 아이 기록 조회, 접종·검진 일정 계산, 소아과 조회·예약. 한 질문에 2~3개를 결합 (예: 기록 조회 → 접종 계산)
 - Day 5: 가드레일 (#6) — 입력은 규칙 기반(응급 신호, 프롬프트 인젝션, 지원 범위 밖, 개인정보 마스킹), 출력은 LLM 판정(진단·약 용량 포함 여부)
@@ -22,9 +22,9 @@ POST /query {question, thread_id?}                          src/api.py
   │
   ▼ run_query()                                             src/agent.py
   ① 개인정보 마스킹 ─────────────────────────────────────── src/guardrails.py
-  ② 승인 대기 중인 예약이 있으면 → '예'/'아니오'로 해석해 재개
-  ③ 입력 가드레일 (규칙): 응급 → 인젝션 → 범위 밖
+  ② 입력 가드레일 (규칙): 응급 → 인젝션 → 범위 밖
        └ 걸리면 LLM 없이 고정 안내 문구로 즉시 반환
+  ③ 승인 대기 중인 예약이 있으면 → '예'/'아니오'로 해석해 재개 (애매하면 다시 확인)
   ④ ReAct 에이전트 (create_agent + ChatBedrockConverse, temperature 0)
        도구 ─────────────────────────────────────────────── src/tools.py
          retrieve_guide ─ 하이브리드 검색 ─────────────────── src/retriever.py
@@ -140,10 +140,10 @@ python evaluation/run_eval.py --round 4 --ids 7,13 # 일부 문항만 (리포트
 ## 핵심 코드 위치
 - `src/agent.py:94` — 메인 에이전트 그래프 (`build_agent`: create_agent + 폴백·HITL 미들웨어)
 - `src/agent.py:58` — 시스템 프롬프트 (답변 원칙 9가지)
-- `src/agent.py:236` — `run_query`: 마스킹 → 승인 재개 → 입력 가드레일 → 에이전트 → 출력 가드레일
+- `src/agent.py:238` — `run_query`: 마스킹 → 입력 가드레일 → 승인 재개 → 에이전트 → 출력 가드레일
 - `src/tools.py` — 도메인 도구 6개 (`retrieve_guide:105`, `get_baby_records:123`, `calc_vaccine_schedule:150`, `calc_checkup_schedule:193`, `search_clinics:271`, `book_clinic:312`)
 - `src/retriever.py` — RAG 파이프라인 (`load_guides:32`, RRF 결합 `_reciprocal_rank_fusion:80`, `search:93`)
-- `src/guardrails.py` — 입력·출력 가드레일 (`EMERGENCY_RULES:13`, `check_input:99`, `mask_pii:113`, `check_output:145`)
+- `src/guardrails.py` — 입력·출력 가드레일 (`EMERGENCY_RULES:13`, `check_input:110`, `mask_pii:124`, `check_output:159`)
 - `src/llm.py` — Bedrock 모델 생성과 모델·리전 폴백
-- `src/api.py:41` — `POST /query`
+- `src/api.py:48` — `POST /query` (내부 오류도 세 키 형식으로 응답)
 - `evaluation/run_eval.py` — 채점 스크립트 (자동 판정 `grade:53`, RAGAS `run_ragas:93`)

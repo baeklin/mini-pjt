@@ -19,7 +19,11 @@ EMERGENCY_RULES = [
     ),
     (
         "의식저하",
-        re.compile(r"의식|깨지\s*않|안\s*깨|축\s*처|늘어져|입술.{0,4}(보라|파랗|파래)"),
+        # '통잠 자며 깨지 않아요', '안 깨워도 되나요', '의식주' 같은 일상 표현은 잡지 않도록 증상 표현만 잡는다
+        re.compile(
+            r"의식(이|을)?\s*(없|흐려|흐리|잃|저하|떨어|희미)|깨워도\s*(잘\s*)?(안\s*깨|깨지\s*않|일어나지\s*않)"
+            r"|잘\s*깨지\s*않|안\s*깨어나|깨어나지\s*않|축\s*처|축\s*늘어|늘어져|입술.{0,4}(보라|파랗|파래)"
+        ),
         f"의식이 흐려지거나 처지는 것은 응급 신호입니다. {GO_TO_ER}",
     ),
 ]
@@ -47,6 +51,10 @@ OUTPUT_REFUSAL_MESSAGE = (
 )
 
 TEMPERATURE_PATTERN = re.compile(r"(\d{2}(?:\.\d)?)\s*(?:도|℃|°C|°)")
+# '열이 38.5 넘어요'처럼 단위 없이 쓴 체온은 '열·체온' 바로 뒤의 숫자만 체온으로 본다
+UNITLESS_TEMPERATURE_PATTERN = re.compile(r"(?:열|체온)\D{0,8}?(\d{2}(?:\.\d)?)")
+# 'N살/N세'가 아이 나이가 아닌 경우: '3세끼', '엄마 나이 35세' 등
+NON_CHILD_AGE_BEFORE = re.compile(r"(엄마|아빠|부모|나이|할머니|할아버지|어른)\D{0,6}$")
 PHONE_PATTERN = re.compile(r"(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})")
 RRN_PATTERN = re.compile(r"\d{6}[-\s]?[1-4]\d{6}")
 
@@ -72,7 +80,8 @@ def check_emergency(question: str, profile_age_months: int) -> tuple[str, str] |
     for name, pattern, message in EMERGENCY_RULES:
         if pattern.search(question):
             return name, message
-    temperatures = [float(t) for t in TEMPERATURE_PATTERN.findall(question)]
+    found = TEMPERATURE_PATTERN.findall(question) + UNITLESS_TEMPERATURE_PATTERN.findall(question)
+    temperatures = [float(t) for t in found if 34.0 <= float(t) <= 43.0]  # 체온으로 볼 수 있는 범위만
     age = extract_age_months(question)
     age = profile_age_months if age is None else age
     if any(t >= 38.0 for t in temperatures) and age < 3:
@@ -90,7 +99,9 @@ def check_out_of_range(question: str) -> bool:
     if match := re.search(r"(\d+)\s*개월", question):
         if int(match.group(1)) > 24:
             return True
-    if match := re.search(r"(\d+)\s*(살|세)", question):
+    for match in re.finditer(r"(\d+)\s*(살|세)(?![끼트대])", question):
+        if NON_CHILD_AGE_BEFORE.search(question[: match.start()]):
+            continue  # 보호자 나이 등 아이 나이가 아닌 표현
         if int(match.group(1)) >= 3:
             return True
     return False
@@ -111,9 +122,12 @@ def check_input(question: str, profile_age_months: int) -> tuple[str, str] | Non
 
 
 def mask_pii(text: str) -> str:
-    """휴대폰 번호는 가운데 자리를, 주민등록번호는 전체를 * 로 가린다."""
-    text = PHONE_PATTERN.sub(lambda m: f"{m.group(1)}-****-{m.group(3)}", text)
-    return RRN_PATTERN.sub("******-*******", text)
+    """휴대폰 번호는 가운데 자리를, 주민등록번호는 전체를 * 로 가린다.
+
+    주민등록번호를 먼저 가린다. 2001년생 등은 앞자리가 '01x'라 휴대폰 번호로 먼저 잡히면 뒷자리가 남기 때문이다.
+    """
+    text = RRN_PATTERN.sub("******-*******", text)
+    return PHONE_PATTERN.sub(lambda m: f"{m.group(1)}-****-{m.group(3)}", text)
 
 
 class OutputVerdict(BaseModel):

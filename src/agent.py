@@ -189,6 +189,8 @@ def _approval_message(actions: list[dict], turn: list) -> str:
     for m in turn:
         if isinstance(m, ToolMessage) and m.name == "search_clinics":
             found = json.loads(m.content)
+            if "예약_가능_소아과" not in found:  # 날짜를 해석하지 못한 조회 결과는 건너뛴다
+                continue
             candidates = [f"- {c['이름']}: {', '.join(s[11:] for s in c['예약_가능_시간'])}"
                           for c in found["예약_가능_소아과"]]
             if candidates:
