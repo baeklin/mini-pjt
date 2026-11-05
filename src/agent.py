@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Command
+from langsmith import traceable
 from pydantic import BaseModel, Field
 
 from guardrails import check_input, check_output, mask_pii
@@ -188,6 +189,12 @@ def _approval_message(actions: list[dict], turn: list) -> str:
     return "\n".join(lines)
 
 
+def _mask_trace_inputs(inputs: dict) -> dict:
+    """LangSmith 에 보내는 run_query 입력에서 개인정보를 가린다."""
+    return {**inputs, "question": mask_pii(str(inputs.get("question", "")))}
+
+
+@traceable(name="run_query", run_type="chain", process_inputs=_mask_trace_inputs)
 def run_query(question: str, thread_id: str | None = None) -> dict:
     """질문 하나를 처리해 answer, contexts, trace 세 키를 담은 dict 를 돌려준다.
 
