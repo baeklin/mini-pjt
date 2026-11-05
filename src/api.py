@@ -12,7 +12,7 @@ app = FastAPI(title="AI 육아도우미")
 class QueryRequest(BaseModel):
     """POST /query 요청 본문."""
 
-    question: str = Field(description="사용자 질의")
+    question: str = Field(min_length=1, max_length=1000, description="사용자 질의 (1~1000자)")
     thread_id: str | None = Field(default=None, description="같은 대화를 이어 갈 때 쓰는 대화 ID (선택)")
 
 

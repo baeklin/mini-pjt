@@ -20,7 +20,7 @@ from langgraph.types import Command
 from langsmith import traceable
 from pydantic import BaseModel, Field
 
-from guardrails import check_input, check_output, mask_pii
+from guardrails import check_emergency_llm, check_input, check_output, mask_pii
 from llm import build_models
 from tools import (
     book_clinic,
@@ -251,6 +251,14 @@ def run_query(question: str, thread_id: str | None = None) -> dict:
     profile_age = get_age_months(date.fromisoformat(load_profile()["birth_date"]))
     blocked = check_input(masked, profile_age)
     trace.append({"step": "guardrail:input", "input": masked, "output": blocked[0] if blocked else "pass"})
+    if not blocked:
+        # 규칙에 없는 표현의 응급 신호를 LLM 으로 한 번 더 찾는다 (규칙 + LLM 2단 응급 판정)
+        blocked, reason = check_emergency_llm(masked, profile_age)
+        trace.append({
+            "step": "guardrail:emergency_llm",
+            "input": masked,
+            "output": f"{blocked[0]} ({reason})" if blocked else "pass",
+        })
     if blocked:
         trace.append({"step": "answer", "input": masked, "output": blocked[1]})
         return {"answer": blocked[1], "contexts": [], "trace": trace}

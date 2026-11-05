@@ -1,4 +1,4 @@
-"""입력·출력 가드레일: 응급 신호, 프롬프트 인젝션, 지원 범위 밖 질문, 개인정보 마스킹, 진단·약 용량 출력 검사."""
+"""입력·출력 가드레일: 응급 신호(규칙 + LLM 2단), 프롬프트 인젝션, 지원 범위 밖 질문, 개인정보 마스킹, 진단·약 용량 출력 검사."""
 
 import re
 from functools import lru_cache
@@ -21,11 +21,12 @@ EMERGENCY_RULES = [
         "의식저하",
         # 증상 표현만 잡는다. '깨지 않고 통잠', '안 깨워도', '의식주', '수유 간격이 늘어져요' 같은 일상 표현은 제외
         re.compile(
-            r"의식(이|을)?\s*(없|흐려|흐리|잃|저하|떨어|희미)|정신을\s*잃|반응(이|을)?\s*없"
+            r"의식(이|을)?\s*(없|흐려|흐리|잃|저하|떨어|희미)|정신을\s*잃"
             r"|(깨워도|흔들어도|불러도)\s*(잘\s*)?(안\s*(깨|일어나)|깨지\s*않|일어나지\s*않|반응)"
-            r"|(아기|아이|애)(가|는)?\s*(안\s*깨(?![고워우])|깨지\s*않(?!고)|깨어나지\s*않)"
-            r"|잘\s*깨지\s*않(?!고)|안\s*깨어나|깨어나지\s*않"
-            r"|축\s*(처|늘어)|(아기|아이|애)(가|는)?\s*(축\s*)?늘어(져|졌|지)"
+            r"|(아기|아이|애기?)(가|는)?\s*(안\s*깨(?![고워우])|깨지\s*않(?!고)|깨어나지\s*않)"
+            r"|(열|처지|처져).{0,8}(잘\s*)?(안\s*깨(?![고워우])|깨지\s*않(?!고))|잠에서\s*(안\s*깨|깨지\s*않|못\s*깨)"
+            r"|안\s*깨어나|깨어나지\s*않"
+            r"|축\s*([처쳐]|늘어)|(아기|아이|애기?)(가|는)?\s*(축\s*)?늘어(져|졌)"
             r"|입술.{0,4}(보라|파랗|파래)"
         ),
         f"의식이 흐려지거나 처지는 것은 응급 신호입니다. {GO_TO_ER}",
@@ -60,8 +61,12 @@ FEVER_CONTEXT = re.compile(r"열(?!흘)|체온")
 UNITLESS_NUMBER_PATTERN = re.compile(
     r"(?<![\d.])(\d{2}(?:\.\d)?)(?![\d.])(?!\s*(분|시간|일|개월|달|주|살|세|회|번|ml|mL|g|kg|cm|%|kcal))"
 )
-# 아기 체온이 아닌 온도: '목욕물 38도', '방 온도 24도' 등
-NON_BODY_TEMPERATURE_BEFORE = re.compile(r"(물|방|실내|온도|목욕|분유|우유|이유식)\D{0,4}$")
+# 아기 체온이 아닌 온도: '목욕물 38도', '방 온도 24도' 등. '콧물', '방금', '체온도'를 잘못 걸러내지 않도록 정확한 표현만 본다
+NON_BODY_TEMPERATURE_BEFORE = re.compile(
+    r"(목욕물|목욕|물\s*온도|방\s*온도|실내\s*온도|실내|분유|우유|이유식|젖병)\D{0,4}$"
+)
+# 월령이 아닌 기간 표현: '3일째', '한 달 전부터', '2달 동안'
+NOT_AGE_AFTER = r"(?!\s*(째|전|동안|간|만에|후|뒤|지나|넘게|이상))"
 # 'N살/N세'가 아이 나이가 아닌 경우: '엄마 나이 35세', '형이 4살' 등 ('3세끼'는 패턴 쪽에서 제외)
 NON_CHILD_AGE_BEFORE = re.compile(r"(엄마|아빠|부모|할머니|할아버지|어른|남편|아내|형|누나|언니|오빠)\D{0,6}$")
 KOREAN_NUMBERS = {"한": 1, "두": 2, "세": 3, "네": 4, "다섯": 5, "여섯": 6, "일곱": 7, "여덟": 8, "아홉": 9, "열": 10}
@@ -76,14 +81,17 @@ def extract_age_months(question: str) -> float | None:
     """
     if "신생아" in question:
         return 0
-    if match := re.search(r"생후\s*(\d+)\s*일|(\d+)\s*일\s*(된|째|차)", question):
-        return int(match.group(1) or match.group(2)) / 30
-    if match := re.search(r"생후\s*(\d+)\s*주|(\d+)\s*주\s*(된|째|차)", question):
-        return int(match.group(1) or match.group(2)) / 4.345
-    if match := re.search(r"(\d+)\s*(개월|달)", question):
+    if match := re.search(r"생후\s*(\d+)\s*일", question):
+        return int(match.group(1)) / 30
+    if match := re.search(r"생후\s*(\d+)\s*주", question):
+        return int(match.group(1)) / 4.345
+    if match := re.search(rf"(?<!\d)(\d+)\s*(개월|달){NOT_AGE_AFTER}", question):
         return int(match.group(1))
-    if match := re.search(r"(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*달", question):
+    if match := re.search(rf"(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*달{NOT_AGE_AFTER}", question):
         return KOREAN_NUMBERS[match.group(1)]
+    # '50일 된 아기', '3주 아기'처럼 아기를 가리키는 일·주 표현 ('3일째 열' 같은 기간은 제외)
+    if match := re.search(r"(?<!\d)(\d+)\s*(일|주)\s*(된\s*)?(아기|아이|애기?|신생아)", question):
+        return int(match.group(1)) / (30 if match.group(2) == "일" else 4.345)
     return None
 
 
@@ -132,18 +140,21 @@ def check_out_of_range(question: str) -> bool:
 
     보호자·형제 나이('엄마 나이 35세', '형이 4살')와 '3세끼' 같은 표현은 아이 나이로 보지 않는다.
     """
-    if match := re.search(r"(\d+)\s*(개월|달)", question):
-        if int(match.group(1)) > 24:
-            return True
-    ages = [(m.start(), int(m.group(1))) for m in re.finditer(r"(\d+)\s*(살|세)(?![끼트대])", question)]
+    # '3세까지 맞아야', '3세 이상' 같은 기준 연령 표현은 아이 나이가 아니다
+    not_child_age_after = r"(?![끼트대])(?!\s*(까지|부터|이상|이하|미만|이후|이전|전후|버릇))"
+    ages = [
+        (m.start(), int(m.group(1)) / 12)
+        for m in re.finditer(rf"(?<!\d)(\d+)\s*(개월|달){NOT_AGE_AFTER}", question)
+    ]
+    ages += [(m.start(), int(m.group(1))) for m in re.finditer(rf"(?<!\d)(\d+)\s*(살|세){not_child_age_after}", question)]
     ages += [
         (m.start(), KOREAN_NUMBERS[m.group(1)])
-        for m in re.finditer(r"(?<![가-힣])(세|네|다섯|여섯|일곱|여덟|아홉|열)\s*살", question)
+        for m in re.finditer(rf"(?<![가-힣])(세|네|다섯|여섯|일곱|여덟|아홉|열)\s*살{not_child_age_after}", question)
     ]
-    for start, age in ages:
+    for start, age_years in ages:
         if NON_CHILD_AGE_BEFORE.search(question[:start]):
-            continue
-        if age >= 3:
+            continue  # 보호자·형제 나이
+        if age_years > 2:  # 25개월 이상 또는 3살 이상
             return True
     return False
 
@@ -169,6 +180,59 @@ def mask_pii(text: str) -> str:
     """
     text = RRN_PATTERN.sub("******-*******", text)
     return PHONE_PATTERN.sub(lambda m: f"{m.group(1)}-****-{m.group(3)}", text)
+
+
+class EmergencyVerdict(BaseModel):
+    """LLM 응급 판정 결과."""
+
+    is_emergency: bool = Field(description="질문자가 지금 아이에게 응급 신호가 있다고 말하면 true")
+    sign: str = Field(description="해당하는 응급 신호 이름 (경련, 호흡곤란, 의식저하, 청색증, 3개월미만발열) 또는 '없음'")
+    reason: str = Field(description="판정 이유 한 문장")
+
+
+EMERGENCY_JUDGE_PROMPT = """너는 영아 육아 상담 질문을 응급 여부로 분류하는 검사관이다.
+아래 응급 신호(질병관리청·중앙응급의료센터 자료 기준) 중 하나가 **지금 아이에게 있다고** 질문자가 말하면 응급이다.
+
+[응급 신호]
+- 경련: 경련, 경기, 발작, 몸이 뻣뻣해지며 떨림, 눈이 돌아감
+- 호흡곤란: 숨을 못 쉬거나 쉬지 않음, 숨이 가쁨, 숨 쉴 때 갈비뼈 사이가 들어감
+- 의식저하: 깨워도·흔들어도 안 깸, 불러도 반응이 없음, 축 처지거나 늘어져 반응이 없음, 정신을 잃음
+- 청색증: 입술이나 얼굴이 파랗거나 보라색이 됨
+- 3개월미만발열: 생후 3개월 미만 아기의 체온이 38℃ 이상
+
+[응급이 아닌 경우]
+- 증상이 지금 있다는 말이 아닌 질문: 일반 정보 질문, 가정('경련하면 어떻게 해요?'), 부정('이상반응이 없으면 괜찮나요?', '열은 없어요'), 이미 지나간 일
+- 생후 3개월 이상 아기의 38℃ 이상 발열만 있는 경우 (응급이 아니라 진료 대상)
+- 처짐·수유량 감소만 있고 깨워도 반응하는 경우 (응급이 아니라 바로 진료 대상)
+- 잠을 잘 자는 것, 통잠, 낮잠 시간 변화
+
+아기 월령: {age} (질문에 월령이 적혀 있으면 질문의 월령을 따른다)
+질문: {question}"""
+LLM_EMERGENCY_MESSAGE = f"말씀하신 증상은 응급 신호일 수 있습니다. {GO_TO_ER}"
+
+
+@lru_cache(maxsize=1)
+def _emergency_judge():
+    """응급 판정에 쓸 구조화 출력 LLM(대체 모델 포함)을 한 번만 만든다."""
+    return build_structured_model(EmergencyVerdict)
+
+
+def check_emergency_llm(question: str, profile_age_months: int) -> tuple[tuple[str, str] | None, str]:
+    """규칙을 통과한 질문을 LLM 으로 한 번 더 응급 판정한다. 표현이 달라도 의미로 응급 신호를 찾기 위해서다.
+
+    (막아야 하면 (가드레일 이름, 안내 문구), 아니면 None) 과 판정 이유를 돌려준다.
+    판정 호출이 실패하면 막지 않고 넘긴다 (규칙 가드레일은 이미 통과한 상태).
+    """
+    age = extract_age_months(question)
+    age_text = f"생후 약 {profile_age_months}개월 (프로필)" if age is None else f"생후 약 {age:.1f}개월 (질문)"
+    try:
+        verdict = _emergency_judge().invoke(EMERGENCY_JUDGE_PROMPT.format(age=age_text, question=question))
+    except Exception as error:  # 판정 실패가 서비스를 멈추지 않게 한다
+        return None, f"판정 실패({type(error).__name__})"
+    if not verdict.is_emergency:
+        return None, verdict.reason
+    message = INFANT_FEVER_MESSAGE if verdict.sign == "3개월미만발열" else LLM_EMERGENCY_MESSAGE
+    return (f"emergency_llm:{verdict.sign}", message), verdict.reason
 
 
 class OutputVerdict(BaseModel):
