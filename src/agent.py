@@ -1,4 +1,7 @@
-"""메인 에이전트 그래프: 입력 가드레일 → ReAct 에이전트(도구 3개) → 출력 가드레일 순서로 질문에 답한다."""
+"""메인 에이전트 그래프: 입력 가드레일 → ReAct 에이전트(도메인 도구) → 출력 가드레일 순서로 질문에 답한다.
+
+소아과 예약(book_clinic)은 실행 직전에 멈추고, 같은 thread_id 로 사용자의 승인('예'/'아니오')을 받아 재개한다.
+"""
 
 import json
 import sys
@@ -7,24 +10,40 @@ from datetime import date
 from functools import lru_cache
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelFallbackMiddleware
+from langchain.agents.middleware import HumanInTheLoopMiddleware, ModelFallbackMiddleware
 from langchain.agents.structured_output import ToolStrategy
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from guardrails import check_input, check_output, mask_pii
 from llm import build_models
 from tools import (
+    book_clinic,
     calc_checkup_schedule,
     calc_vaccine_schedule,
+    find_clinic,
     get_age_months,
     get_baby_records,
     load_profile,
     retrieve_guide,
+    search_clinics,
 )
 
-TOOLS = [retrieve_guide, get_baby_records, calc_vaccine_schedule, calc_checkup_schedule]
+TOOLS = [
+    retrieve_guide,
+    get_baby_records,
+    calc_vaccine_schedule,
+    calc_checkup_schedule,
+    search_clinics,
+    book_clinic,
+]
+# 사람 승인 없이는 실행하지 않는 도구
+APPROVAL_TOOLS = {"book_clinic"}
+APPROVE_WORDS = ("예", "네", "응", "좋아", "그래", "승인", "진행")
+REJECT_WORDS = ("아니", "취소", "싫어", "거절", "하지 마", "안 할")
 TOOL_NAMES = {t.name for t in TOOLS}
 # trace 에 남길 도구 출력의 최대 길이
 TRACE_OUTPUT_LIMIT = 500
@@ -47,6 +66,12 @@ SYSTEM_PROMPT = """너는 생후 0~24개월 첫째 아이를 키우는 초보 �
 6. 발달 질문에는 개인차가 있다는 점을 함께 말하고, 걱정되면 소아청소년과 상담을 권한다. 단정하지 않는다.
 7. 날짜를 계산해 답할 때는 기준 날짜를 함께 적는다.
 8. 정중한 존댓말로, 핵심부터 간결하게 답한다. 이모지는 쓰지 않는다.
+9. 소아과 예약 요청에는 search_clinics 로 예약 가능한 소아과와 시간을 먼저 조회한다.
+   예약은 search_clinics 결과에 있는 소아과·시간으로만 할 수 있다. 목록에 없는 병원은 예약할 수 없다고 안내하고
+   예약 가능한 후보를 알려 준다. 목록에 있는 소아과로 예약을 요청받으면 사용자에게 병원·시간을 되묻지 말고,
+   사용자가 정한 병원·시간이 있으면 그 값으로, 없으면 조건에 맞는 가장 이른 시간으로 바로 book_clinic 을 호출한다.
+   book_clinic 은 실행 전에 시스템이 후보 목록과 함께 사용자 승인을 받으므로, 사용자는 그 단계에서 확인하거나
+   거절할 수 있다. 사용자가 거절하면 예약하지 않았다고 안내한다.
 """
 
 
@@ -62,16 +87,25 @@ def build_agent():
     """Bedrock 모델과 도메인 도구로 ReAct 에이전트 그래프를 한 번만 만든다.
 
     대체 모델이 설정되어 있으면 ModelFallbackMiddleware 로 1순위 모델 실패 시 순서대로 넘긴다.
+    HumanInTheLoopMiddleware 로 예약 도구는 실행 직전에 멈추고 사용자 승인을 기다린다.
     """
     primary, *fallbacks = build_models()
     middleware = [ModelFallbackMiddleware(*fallbacks)] if fallbacks else []
+    middleware.append(
+        HumanInTheLoopMiddleware(
+            interrupt_on={name: {"allowed_decisions": ["approve", "reject"]} for name in APPROVAL_TOOLS}
+        )
+    )
     return create_agent(
         model=primary,
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
         response_format=ToolStrategy(AgentAnswer),
         middleware=middleware,
-        checkpointer=InMemorySaver(),
+        # 대화 상태에 저장되는 구조화 출력(AgentAnswer)을 체크포인터가 다시 읽을 수 있도록 허용한다
+        checkpointer=InMemorySaver(
+            serde=JsonPlusSerializer(allowed_msgpack_modules=[(AgentAnswer.__module__, "AgentAnswer")])
+        ),
     )
 
 
@@ -80,10 +114,8 @@ def _truncate(text: str, limit: int = TRACE_OUTPUT_LIMIT) -> str:
     return text if len(text) <= limit else text[:limit] + "...(생략)"
 
 
-def _collect_turn(messages: list) -> tuple[list[dict], list[dict], AIMessage | None]:
-    """이번 질문 이후의 메시지에서 사용 모델·도구 호출 trace, contexts, 마지막 AI 메시지를 모은다."""
-    last_human = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
-    turn = messages[last_human + 1 :]
+def _collect_turn(turn: list) -> tuple[list[dict], list[dict], AIMessage | None]:
+    """이번 턴에 새로 생긴 메시지에서 사용 모델·도구 호출 trace, contexts, 마지막 AI 메시지를 모은다."""
     used_models = list(
         dict.fromkeys(
             f"{m.response_metadata.get('model_name', 'unknown')}@{m.response_metadata.get('region', '?')}"
@@ -123,10 +155,44 @@ def _collect_turn(messages: list) -> tuple[list[dict], list[dict], AIMessage | N
     return trace, contexts, last_ai
 
 
+def _pending_actions(agent, config: dict) -> list[dict]:
+    """이 대화(thread)에서 사용자 승인을 기다리며 멈춘 도구 호출 목록을 돌려준다. 없으면 빈 목록."""
+    interrupts = getattr(agent.get_state(config), "interrupts", ()) or ()
+    return [action for item in interrupts for action in item.value.get("action_requests", [])]
+
+
+def _parse_decision(text: str) -> str | None:
+    """승인 대기 중 사용자 답을 'approve' 또는 'reject' 로 해석한다. 판단할 수 없으면 None."""
+    text = text.strip()
+    if any(word in text for word in REJECT_WORDS):
+        return "reject"
+    if any(text.startswith(word) for word in APPROVE_WORDS) or "승인" in text or "진행해" in text:
+        return "approve"
+    return None
+
+
+def _approval_message(actions: list[dict], turn: list) -> str:
+    """예약 후보(이번 턴의 search_clinics 결과)와 승인 질문을 담은 안내 문구를 만든다."""
+    lines = []
+    for m in turn:
+        if isinstance(m, ToolMessage) and m.name == "search_clinics":
+            found = json.loads(m.content)
+            candidates = [f"- {c['이름']}: {', '.join(s[11:] for s in c['예약_가능_시간'])}"
+                          for c in found["예약_가능_소아과"]]
+            if candidates:
+                lines += [f"{found['조회_날짜']} 예약 가능한 소아과입니다.", *candidates, ""]
+    for action in actions:
+        clinic = find_clinic(action["args"].get("clinic_id", "")) or {"name": action["args"].get("clinic_id")}
+        lines.append(f"{clinic['name']} {action['args'].get('slot')} 예약을 진행할까요?")
+    lines.append("예약하시려면 '예', 취소하시려면 '아니오'라고 답해 주세요. 다른 병원·시간을 원하시면 '아니오' 후 다시 요청해 주세요.")
+    return "\n".join(lines)
+
+
 def run_query(question: str, thread_id: str | None = None) -> dict:
     """질문 하나를 처리해 answer, contexts, trace 세 키를 담은 dict 를 돌려준다.
 
     thread_id 가 같으면 이전 대화를 이어 가고, 없으면 새 대화로 처리한다.
+    같은 thread 에 승인 대기 중인 예약이 있으면 이번 질문을 '예'/'아니오' 답으로 보고 재개한다.
     """
     trace = []
     masked = mask_pii(question)
@@ -140,10 +206,41 @@ def run_query(question: str, thread_id: str | None = None) -> dict:
         trace.append({"step": "answer", "input": masked, "output": blocked[1]})
         return {"answer": blocked[1], "contexts": [], "trace": trace}
 
+    agent = build_agent()
     config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
-    result = build_agent().invoke({"messages": [{"role": "user", "content": masked}]}, config)
-    tool_trace, contexts, last_ai = _collect_turn(result["messages"])
+    previous_count = len(agent.get_state(config).values.get("messages", []))
+    pending = _pending_actions(agent, config)
+    if pending:
+        decision = _parse_decision(masked)
+        if decision is None:
+            answer = "먼저 예약 승인 여부를 알려 주세요.\n" + _approval_message(pending, [])
+            trace.append({"step": "hitl:book_clinic", "input": masked, "output": "답을 판단할 수 없어 다시 확인"})
+            trace.append({"step": "answer", "input": masked, "output": answer})
+            return {"answer": answer, "contexts": [], "trace": trace}
+        trace.append({"step": "hitl:book_clinic", "input": masked, "output": "승인" if decision == "approve" else "거절"})
+        payload = Command(resume={"decisions": [{"type": decision} for _ in pending]})
+        turn_start = previous_count
+    else:
+        payload = {"messages": [{"role": "user", "content": masked}]}
+        turn_start = previous_count + 1  # 방금 추가된 사용자 메시지 다음부터
+
+    result = agent.invoke(payload, config)
+    turn = result["messages"][turn_start:]
+    tool_trace, contexts, last_ai = _collect_turn(turn)
     trace.extend(tool_trace)
+
+    waiting = _pending_actions(agent, config)
+    if waiting:
+        for action in waiting:
+            trace.append({
+                "step": f"tool:{action['name']}",
+                "input": json.dumps(action["args"], ensure_ascii=False),
+                "output": "승인 대기 (아직 실행되지 않음)",
+            })
+        answer = _approval_message(waiting, turn)
+        trace.append({"step": "hitl:book_clinic", "input": masked, "output": "승인 요청"})
+        trace.append({"step": "answer", "input": masked, "output": answer})
+        return {"answer": answer, "contexts": contexts, "trace": trace}
 
     structured = result.get("structured_response")
     draft = structured.answer if structured else (last_ai.text if last_ai else "")

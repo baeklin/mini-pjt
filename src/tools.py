@@ -1,9 +1,10 @@
-"""도메인 도구: 육아 가이드 검색, 아이 기록 조회, 예방접종·건강검진 일정 계산."""
+"""도메인 도구: 육아 가이드 검색, 아이 기록 조회, 예방접종·건강검진 일정 계산, 소아과 조회·예약."""
 
 import calendar
 import json
 import os
 from datetime import date, timedelta
+from itertools import count
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -230,5 +231,100 @@ def calc_checkup_schedule(birth_date: str) -> str:
         "다음_검진": checkups,
         "마감일_안내": "정확한 검진 기간(마감일)은 국민건강보험공단 '영유아 검진일자 조회'에서 확인",
         "근거": "국민건강보험공단 영유아 건강검진 안내 (가이드 문서: 영유아 건강검진 시기)",
+    }
+    return json.dumps(result, ensure_ascii=False)
+
+
+# 시연용 예약 저장소 (메모리). 서버를 다시 시작하면 사라진다.
+_BOOKINGS: dict[str, dict] = {}
+_BOOKED_SLOTS: set[tuple[str, str]] = set()
+_BOOKING_NUMBERS = count(1)
+TIME_RANGES = {"오전": (0, 12), "오후": (12, 18), "저녁": (18, 24), "전체": (0, 24)}
+
+
+def load_clinics() -> list[dict]:
+    """더미 소아과 목록(data/clinics.json)을 읽는다."""
+    return json.loads((DATA_DIR / "clinics.json").read_text(encoding="utf-8"))["clinics"]
+
+
+def find_clinic(clinic_id: str) -> dict | None:
+    """clinic_id 로 소아과 정보를 찾는다. 없으면 None 을 돌려준다."""
+    return next((c for c in load_clinics() if c["clinic_id"] == clinic_id), None)
+
+
+WEEKDAYS = "월화수목금토일"
+
+
+def format_day(day: date) -> str:
+    """날짜를 'YYYY-MM-DD(요일)' 형식으로 만든다. LLM 이 요일을 직접 계산하지 않도록 도구 결과에 넣는다."""
+    return f"{day.isoformat()}({WEEKDAYS[day.weekday()]})"
+
+
+def _resolve_date(value: str) -> date:
+    """'오늘', '내일', '모레' 또는 YYYY-MM-DD 를 기준 날짜 기준의 날짜로 바꾼다."""
+    offsets = {"오늘": 0, "내일": 1, "모레": 2}
+    value = value.strip()
+    return get_today() + timedelta(days=offsets[value]) if value in offsets else date.fromisoformat(value)
+
+
+@tool
+def search_clinics(day: str = "내일", time_of_day: str = "전체") -> str:
+    """예약 가능한 소아과와 시간을 조회한다. 예약 가능한 소아과는 이 목록에 있는 곳뿐이다.
+
+    day 는 '오늘', '내일', '모레' 또는 YYYY-MM-DD, time_of_day 는 '오전', '오후', '저녁', '전체' 중 하나다.
+    결과의 clinic_id 와 시간(YYYY-MM-DD HH:MM)을 book_clinic 에 그대로 넘긴다.
+    """
+    target = _resolve_date(day)
+    start_hour, end_hour = TIME_RANGES.get(time_of_day, TIME_RANGES["전체"])
+    clinics = []
+    for clinic in load_clinics():
+        slots = [
+            slot for slot in clinic["available_slots"]
+            if slot.startswith(target.isoformat())
+            and start_hour <= int(slot[11:13]) < end_hour
+            and (clinic["clinic_id"], slot) not in _BOOKED_SLOTS
+        ]
+        if slots:
+            clinics.append({
+                "clinic_id": clinic["clinic_id"],
+                "이름": clinic["name"],
+                "지역": clinic["area"],
+                "진료시간": clinic["open_hours"],
+                "예약_가능_시간": slots,
+            })
+    result = {
+        "기준_날짜": format_day(get_today()),
+        "조회_날짜": format_day(target),
+        "시간대": time_of_day,
+        "예약_가능_소아과": clinics,
+        "안내": "이 목록에 없는 병원은 예약할 수 없다",
+    }
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool
+def book_clinic(clinic_id: str, slot: str) -> str:
+    """소아과를 예약한다. 사용자 승인을 받은 뒤에만 실행된다.
+
+    clinic_id 와 slot(YYYY-MM-DD HH:MM)은 search_clinics 결과에 있는 값만 쓸 수 있다.
+    보호자 연락처는 프로필에 등록된 번호를 쓴다.
+    """
+    clinic = find_clinic(clinic_id)
+    if clinic is None or slot not in clinic["available_slots"] or (clinic_id, slot) in _BOOKED_SLOTS:
+        return json.dumps(
+            {"예약_결과": "실패", "이유": "예약 가능한 소아과·시간 목록에 없습니다. search_clinics 로 다시 조회하세요."},
+            ensure_ascii=False,
+        )
+    booking_id = f"BK-{next(_BOOKING_NUMBERS):04d}"
+    phone = load_profile()["guardian"]["phone"]
+    _BOOKED_SLOTS.add((clinic_id, slot))
+    _BOOKINGS[booking_id] = {"clinic_id": clinic_id, "slot": slot}
+    result = {
+        "예약_결과": "완료",
+        "예약번호": booking_id,
+        "소아과": clinic["name"],
+        "시간": f"{format_day(date.fromisoformat(slot[:10]))} {slot[11:]}",
+        "연락처": f"{phone[:3]}-****-{phone[-4:]}",
+        "안내": "시연용 예약입니다. 실제 병원에 예약되지 않습니다.",
     }
     return json.dumps(result, ensure_ascii=False)
