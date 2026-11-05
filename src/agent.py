@@ -194,6 +194,33 @@ def _approval_message(actions: list[dict], turn: list) -> str:
     return "\n".join(lines)
 
 
+def _booking_message(turn: list) -> str | None:
+    """승인 후 실행된 book_clinic 결과로 예약 안내 문구를 만든다. 예약 결과가 없으면 None.
+
+    예약 결과는 정확해야 하므로 LLM 이 쓰지 않고 도구 결과로만 만든다
+    (LLM 이 예약 전 조회 목록을 다시 보여 주며 방금 예약한 시간을 '예약 가능'으로 적던 문제 방지).
+    """
+    for m in turn:
+        if not (isinstance(m, ToolMessage) and m.name == "book_clinic"):
+            continue
+        try:
+            result = json.loads(m.content)
+        except (TypeError, ValueError):  # 거절된 호출은 JSON 이 아닌 안내 문장이다
+            continue
+        if result.get("예약_결과") == "완료":
+            return "\n".join([
+                "예약을 완료했습니다.",
+                f"- 소아과: {result['소아과']}",
+                f"- 일시: {result['시간']}",
+                f"- 예약번호: {result['예약번호']}",
+                f"- 연락처: {result['연락처']} (프로필에 등록된 번호)",
+                "",
+                result["안내"],
+            ])
+        return f"예약하지 못했습니다. {result.get('이유', '')}".strip()
+    return None
+
+
 def _mask_trace_inputs(inputs: dict) -> dict:
     """LangSmith 에 보내는 run_query 입력에서 개인정보를 가린다."""
     return {**inputs, "question": mask_pii(str(inputs.get("question", "")))}
@@ -222,6 +249,7 @@ def run_query(question: str, thread_id: str | None = None) -> dict:
     config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
     previous_count = len(agent.get_state(config).values.get("messages", []))
     pending = _pending_actions(agent, config)
+    decision = None
     if pending:
         decision = _parse_decision(masked)
         if decision is None:
@@ -251,6 +279,12 @@ def run_query(question: str, thread_id: str | None = None) -> dict:
             })
         answer = _approval_message(waiting, turn)
         trace.append({"step": "hitl:book_clinic", "input": masked, "output": "승인 요청"})
+        trace.append({"step": "answer", "input": masked, "output": answer})
+        return {"answer": answer, "contexts": contexts, "trace": trace}
+
+    booked = _booking_message(turn) if decision == "approve" else None
+    if booked:
+        answer = mask_pii(booked)
         trace.append({"step": "answer", "input": masked, "output": answer})
         return {"answer": answer, "contexts": contexts, "trace": trace}
 
