@@ -19,10 +19,14 @@ EMERGENCY_RULES = [
     ),
     (
         "의식저하",
-        # '통잠 자며 깨지 않아요', '안 깨워도 되나요', '의식주' 같은 일상 표현은 잡지 않도록 증상 표현만 잡는다
+        # 증상 표현만 잡는다. '깨지 않고 통잠', '안 깨워도', '의식주', '수유 간격이 늘어져요' 같은 일상 표현은 제외
         re.compile(
-            r"의식(이|을)?\s*(없|흐려|흐리|잃|저하|떨어|희미)|깨워도\s*(잘\s*)?(안\s*깨|깨지\s*않|일어나지\s*않)"
-            r"|잘\s*깨지\s*않|안\s*깨어나|깨어나지\s*않|축\s*처|축\s*늘어|늘어져|입술.{0,4}(보라|파랗|파래)"
+            r"의식(이|을)?\s*(없|흐려|흐리|잃|저하|떨어|희미)|정신을\s*잃|반응(이|을)?\s*없"
+            r"|(깨워도|흔들어도|불러도)\s*(잘\s*)?(안\s*(깨|일어나)|깨지\s*않|일어나지\s*않|반응)"
+            r"|(아기|아이|애)(가|는)?\s*(안\s*깨(?![고워우])|깨지\s*않(?!고)|깨어나지\s*않)"
+            r"|잘\s*깨지\s*않(?!고)|안\s*깨어나|깨어나지\s*않"
+            r"|축\s*(처|늘어)|(아기|아이|애)(가|는)?\s*(축\s*)?늘어(져|졌|지)"
+            r"|입술.{0,4}(보라|파랗|파래)"
         ),
         f"의식이 흐려지거나 처지는 것은 응급 신호입니다. {GO_TO_ER}",
     ),
@@ -50,26 +54,56 @@ OUTPUT_REFUSAL_MESSAGE = (
     "의사나 약사와 상의해 주세요."
 )
 
-TEMPERATURE_PATTERN = re.compile(r"(\d{2}(?:\.\d)?)\s*(?:도|℃|°C|°)")
-# '열이 38.5 넘어요'처럼 단위 없이 쓴 체온은 '열·체온' 바로 뒤의 숫자만 체온으로 본다
-UNITLESS_TEMPERATURE_PATTERN = re.compile(r"(?:열|체온)\D{0,8}?(\d{2}(?:\.\d)?)")
-# 'N살/N세'가 아이 나이가 아닌 경우: '3세끼', '엄마 나이 35세' 등
-NON_CHILD_AGE_BEFORE = re.compile(r"(엄마|아빠|부모|나이|할머니|할아버지|어른)\D{0,6}$")
+TEMPERATURE_PATTERN = re.compile(r"(?<![\d.])(\d{2}(?:\.\d)?)\s*(?:도|℃|°C|°)")
+# '열이 37.9에서 38.4로'처럼 단위 없이 쓴 체온: '열·체온'이 나온 질문의 두 자리 숫자를 모두 후보로 본다
+FEVER_CONTEXT = re.compile(r"열(?!흘)|체온")
+UNITLESS_NUMBER_PATTERN = re.compile(
+    r"(?<![\d.])(\d{2}(?:\.\d)?)(?![\d.])(?!\s*(분|시간|일|개월|달|주|살|세|회|번|ml|mL|g|kg|cm|%|kcal))"
+)
+# 아기 체온이 아닌 온도: '목욕물 38도', '방 온도 24도' 등
+NON_BODY_TEMPERATURE_BEFORE = re.compile(r"(물|방|실내|온도|목욕|분유|우유|이유식)\D{0,4}$")
+# 'N살/N세'가 아이 나이가 아닌 경우: '엄마 나이 35세', '형이 4살' 등 ('3세끼'는 패턴 쪽에서 제외)
+NON_CHILD_AGE_BEFORE = re.compile(r"(엄마|아빠|부모|할머니|할아버지|어른|남편|아내|형|누나|언니|오빠)\D{0,6}$")
+KOREAN_NUMBERS = {"한": 1, "두": 2, "세": 3, "네": 4, "다섯": 5, "여섯": 6, "일곱": 7, "여덟": 8, "아홉": 9, "열": 10}
 PHONE_PATTERN = re.compile(r"(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})")
 RRN_PATTERN = re.compile(r"\d{6}[-\s]?[1-4]\d{6}")
 
 
 def extract_age_months(question: str) -> float | None:
-    """질문에 적힌 아기 월령(개월)을 찾는다. '생후 N개월', 'N개월', '생후 N주', '생후 N일', '신생아' 를 인식한다."""
+    """질문에 적힌 아기 월령(개월)을 찾는다.
+
+    '신생아', '생후 N일'·'N일 된', '생후 N주'·'N주 된', 'N개월'·'N달', '한·두·세 달' 을 인식한다.
+    """
     if "신생아" in question:
         return 0
-    if match := re.search(r"생후\s*(\d+)\s*일", question):
-        return int(match.group(1)) / 30
-    if match := re.search(r"생후\s*(\d+)\s*주", question):
-        return int(match.group(1)) / 4.345
-    if match := re.search(r"(\d+)\s*개월", question):
+    if match := re.search(r"생후\s*(\d+)\s*일|(\d+)\s*일\s*(된|째|차)", question):
+        return int(match.group(1) or match.group(2)) / 30
+    if match := re.search(r"생후\s*(\d+)\s*주|(\d+)\s*주\s*(된|째|차)", question):
+        return int(match.group(1) or match.group(2)) / 4.345
+    if match := re.search(r"(\d+)\s*(개월|달)", question):
         return int(match.group(1))
+    if match := re.search(r"(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*달", question):
+        return KOREAN_NUMBERS[match.group(1)]
     return None
+
+
+def _body_temperatures(question: str) -> list[float]:
+    """질문에서 아기 체온으로 볼 수 있는 숫자(34~43)를 모두 찾는다.
+
+    단위('도·℃')가 붙은 숫자와, '열·체온'이 나온 질문의 단위 없는 숫자를 본다.
+    '40분' 같은 다른 단위의 숫자와 '목욕물·방 온도' 처럼 아기 체온이 아닌 온도는 뺀다.
+    """
+    matches = list(TEMPERATURE_PATTERN.finditer(question))
+    if FEVER_CONTEXT.search(question):
+        matches += list(UNITLESS_NUMBER_PATTERN.finditer(question))
+    values = []
+    for match in matches:
+        if NON_BODY_TEMPERATURE_BEFORE.search(question[: match.start()]):
+            continue
+        value = float(match.group(1))
+        if 34.0 <= value <= 43.0:
+            values.append(value)
+    return values
 
 
 def check_emergency(question: str, profile_age_months: int) -> tuple[str, str] | None:
@@ -80,8 +114,7 @@ def check_emergency(question: str, profile_age_months: int) -> tuple[str, str] |
     for name, pattern, message in EMERGENCY_RULES:
         if pattern.search(question):
             return name, message
-    found = TEMPERATURE_PATTERN.findall(question) + UNITLESS_TEMPERATURE_PATTERN.findall(question)
-    temperatures = [float(t) for t in found if 34.0 <= float(t) <= 43.0]  # 체온으로 볼 수 있는 범위만
+    temperatures = _body_temperatures(question)
     age = extract_age_months(question)
     age = profile_age_months if age is None else age
     if any(t >= 38.0 for t in temperatures) and age < 3:
@@ -95,14 +128,22 @@ def detect_injection(question: str) -> bool:
 
 
 def check_out_of_range(question: str) -> bool:
-    """질문이 0~24개월 지원 범위를 벗어난 아이에 관한 것인지 판단한다 (25개월 이상, 3살 이상)."""
-    if match := re.search(r"(\d+)\s*개월", question):
+    """질문이 0~24개월 지원 범위를 벗어난 아이에 관한 것인지 판단한다 (25개월 이상, 3살 이상).
+
+    보호자·형제 나이('엄마 나이 35세', '형이 4살')와 '3세끼' 같은 표현은 아이 나이로 보지 않는다.
+    """
+    if match := re.search(r"(\d+)\s*(개월|달)", question):
         if int(match.group(1)) > 24:
             return True
-    for match in re.finditer(r"(\d+)\s*(살|세)(?![끼트대])", question):
-        if NON_CHILD_AGE_BEFORE.search(question[: match.start()]):
-            continue  # 보호자 나이 등 아이 나이가 아닌 표현
-        if int(match.group(1)) >= 3:
+    ages = [(m.start(), int(m.group(1))) for m in re.finditer(r"(\d+)\s*(살|세)(?![끼트대])", question)]
+    ages += [
+        (m.start(), KOREAN_NUMBERS[m.group(1)])
+        for m in re.finditer(r"(?<![가-힣])(세|네|다섯|여섯|일곱|여덟|아홉|열)\s*살", question)
+    ]
+    for start, age in ages:
+        if NON_CHILD_AGE_BEFORE.search(question[:start]):
+            continue
+        if age >= 3:
             return True
     return False
 
