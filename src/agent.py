@@ -116,8 +116,12 @@ def _truncate(text: str, limit: int = TRACE_OUTPUT_LIMIT) -> str:
     return text if len(text) <= limit else text[:limit] + "...(생략)"
 
 
-def _collect_turn(turn: list) -> tuple[list[dict], list[dict], AIMessage | None]:
-    """이번 턴에 새로 생긴 메시지에서 사용 모델·도구 호출 trace, contexts, 마지막 AI 메시지를 모은다."""
+def _collect_turn(turn: list, all_messages: list) -> tuple[list[dict], list[dict], AIMessage | None]:
+    """이번 턴에 새로 생긴 메시지에서 사용 모델·도구 호출 trace, contexts, 마지막 AI 메시지를 모은다.
+
+    도구 인자는 대화 전체에서 찾는다. 승인 후 재개된 예약처럼 도구 호출은 이전 턴에 만들어지고
+    실행 결과만 이번 턴에 생기는 경우가 있기 때문이다.
+    """
     used_models = list(
         dict.fromkeys(
             f"{m.response_metadata.get('model_name', 'unknown')}@{m.response_metadata.get('region', '?')}"
@@ -127,7 +131,7 @@ def _collect_turn(turn: list) -> tuple[list[dict], list[dict], AIMessage | None]
     )
     tool_args = {
         call["id"]: call["args"]
-        for m in turn
+        for m in all_messages
         if isinstance(m, AIMessage)
         for call in m.tool_calls
     }
@@ -234,7 +238,7 @@ def run_query(question: str, thread_id: str | None = None) -> dict:
 
     result = agent.invoke(payload, config)
     turn = result["messages"][turn_start:]
-    tool_trace, contexts, last_ai = _collect_turn(turn)
+    tool_trace, contexts, last_ai = _collect_turn(turn, result["messages"])
     trace.extend(tool_trace)
 
     waiting = _pending_actions(agent, config)
