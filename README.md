@@ -17,6 +17,33 @@
 - Day 7: 평가 (#12) — 인-아웃 세트 21건 자동·사람 판정 + RAGAS 4지표, 1차·2차·3차(최종) 리포트
 
 ## 아키텍처
+
+### 처리 흐름
+
+```mermaid
+flowchart TD
+    Q["POST /query<br/>question, thread_id?"] --> M[개인정보 마스킹]
+    M --> R{"1단 규칙 가드레일<br/>응급 · 인젝션 · 범위 밖"}
+    R -- 걸림 --> F["고정 안내 문구<br/>119·응급실 / 거절 / 범위 밖"]
+    R -- 통과 --> L{"2단 LLM 응급 판정"}
+    L -- 응급 --> F
+    L -- 통과 --> P{"승인 대기 중인 예약?"}
+    P -- 있음 --> D{"'예' / '아니오' 해석"}
+    D -- 애매함 --> AQ[다시 확인 질문]
+    D -- 승인 --> B["book_clinic 실행<br/>예약 결과 안내(코드 생성)"]
+    D -- 거절 --> A
+    P -- 없음 --> A["ReAct 에이전트<br/>create_agent + Bedrock Claude<br/>(모델·리전 폴백)"]
+    A <--> T[["도구<br/>retrieve_guide · get_baby_records<br/>calc_vaccine_schedule · calc_checkup_schedule<br/>search_clinics · book_clinic"]]
+    A -- book_clinic 호출 --> H["HITL 일시정지<br/>후보 목록 + 승인 질문"]
+    A --> O{"출력 가드레일<br/>진단·약 용량?"}
+    O -- 위반 --> X[거절 문구로 교체]
+    O -- 통과 --> OUT["answer · contexts · trace"]
+```
+
+LangSmith 에는 `run_query` 하나가 위 흐름 전체를 담은 하나의 트리로 기록된다.
+
+### 구성 요소와 파일
+
 ```
 POST /query {question, thread_id?}                          src/api.py
   │
