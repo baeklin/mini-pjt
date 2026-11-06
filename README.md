@@ -97,6 +97,14 @@ curl -X POST http://127.0.0.1:8000/query -H "Content-Type: application/json" \
   -d '{"question": "예", "thread_id": "demo-1"}'
 ```
 
+Windows 에서는 위 curl 예시를 한글 질문 그대로 실행하면 셸이 본문을 UTF-8 로 보내지 않아 `400 Bad Request` 가 날 수 있다 (코드 문제가 아니며 Linux·Mac 터미널은 그대로 동작). PowerShell 에서는 요청 본문을 UTF-8 바이트로 보내고, 응답도 UTF-8 로 읽는다 (Windows PowerShell 5.1 의 `Invoke-RestMethod` 는 응답 한글이 깨져 보인다):
+```powershell
+$body = @{ question = "내일 오전 소아과 예약해줘"; thread_id = "demo-1" } | ConvertTo-Json
+$res = Invoke-WebRequest -Uri http://127.0.0.1:8000/query -Method Post -UseBasicParsing `
+  -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
+[Text.Encoding]::UTF8.GetString($res.RawContentStream.ToArray()) | ConvertFrom-Json
+```
+
 평가 실행:
 ```powershell
 python evaluation/run_eval.py --round 4            # 21문항 + RAGAS → evaluation/round4_report.md
@@ -106,6 +114,24 @@ python evaluation/run_eval.py --round 4 --ids 7,13 # 일부 문항만 (리포트
 - 평가 재현성을 위해 기준 날짜는 `.env` 의 `TODAY=2026-11-04` 로 고정한다.
 - 필요한 AWS 권한: Bedrock 의 Claude 모델(`BEDROCK_MODEL_ID`, 대체 모델 포함)과 임베딩 모델 `amazon.titan-embed-text-v2:0` 에 대한 `bedrock:InvokeModel`. 임베딩 권한이 없으면 문서 검색(`retrieve_guide`)이 동작하지 않는다.
 - 대체 모델은 `BEDROCK_FALLBACK_MODEL_IDS` 에 `모델ID@리전` 을 쉼표로 적는다.
+
+## 시연 화면
+API 서버의 Swagger UI(`/docs`)에서 `POST /query` 를 호출한 결과와 LangSmith 트레이스. 데이터는 모두 더미다.
+
+1. 기본 질의 — 기록 조회 + 접종 일정 계산 도구를 결합해 다음 예방접종을 안내
+   ![기본 질의 예방접종](docs/screenshots/01_기본질의_예방접종.png)
+2. 응급 1단 (규칙) — 생후 2개월 38.2℃ 발열을 규칙이 잡아 LLM 없이 119·응급실 안내
+   ![응급 규칙 3개월 미만 발열](docs/screenshots/02_응급_규칙_3개월미만발열.png)
+3. 응급 2단 (LLM 판정) — 규칙에 없는 표현 "경기를 해요"를 LLM 이 경련으로 판정해 응급 안내
+   ![응급 LLM 판정 경기](docs/screenshots/03_응급_LLM판정_경기.png)
+4. 예약 승인 요청 (HITL) — `book_clinic` 실행 직전에 멈추고 후보 목록과 승인 질문을 보여 줌
+   ![예약 승인 요청](docs/screenshots/04_예약승인_요청.png)
+5. 애매한 답 처리 — 승인 대기 중 "예약 시간 바꿔줘"는 승인으로 보지 않고 다시 확인
+   ![예약 승인 재확인](docs/screenshots/05_예약승인_요청2.png)
+6. 예약 완료 — "네" 승인 후 예약번호 발급, 연락처는 마스킹
+   ![예약 승인 완료](docs/screenshots/06_예약승인_완료.png)
+7. LangSmith 트레이스 — `run_query` 하나가 하나의 트리로 기록 (LLM 응급 판정 호출)
+   ![LangSmith 트리](docs/screenshots/07_LangSmith_트리.png)
 
 ## RAGAS 평가 결과
 3차(최종) 평가 기준. 계산 범위는 문서를 근거로 답해야 하는 positive·edge 6문항(2, 3, 5, 6, 13, 14번)이다 (SERVICE.md 5번). 계산 실패(nan) 0건.
